@@ -9,8 +9,9 @@
  *
  * Google requires client_secret for this exchange even for "Desktop app" clients,
  * and the secret must belong to the SAME OAuth client as the code. When the session
- * client id differs from GOOGLE_CLIENT_ID, pass the matching secret in
- * GOOGLE_CLIENT_SECRET_OVERRIDE.
+ * client id differs from GOOGLE_CLIENT_ID, supply the matching secret out of band --
+ * preferably in a 0600 file (see SECRET_FILES), since a command-line argument is
+ * visible in `ps` and an environment variable in /proc/<pid>/environ.
  *
  * The refresh token is written to disk with 0600 permissions and is deliberately
  * never printed, so it does not end up in terminal scrollback or logs.
@@ -31,6 +32,44 @@ const SESSION_PATHS = [
   '/cursor/stores/self/google-oauth-session.json',
   '/tmp/google-oauth-session.json',
 ];
+
+/**
+ * Where a client secret for a non-default OAuth client may be left, most trusted first.
+ *
+ * Deliberately NOT under /cursor/stores: that is a FUSE mount which ignores chmod and
+ * is mounted allow_other, so a secret left there stays world-readable. Persistence for
+ * a client secret belongs in a Cloud Agent Secret, not on disk.
+ */
+const SECRET_FILES = [
+  process.env.GOOGLE_CLIENT_SECRET_FILE,
+  path.join(
+    process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
+    APP_NAME,
+    'client-secret.txt'
+  ),
+].filter(Boolean);
+
+/**
+ * Resolve the client secret to exchange with.
+ *
+ * A file is preferred over GOOGLE_CLIENT_SECRET_OVERRIDE because an environment
+ * variable is readable from /proc/<pid>/environ for the process lifetime, and a
+ * command-line argument is worse still. Returns the source alongside the value so
+ * the caller can report which one was used without printing the secret.
+ */
+function resolveOverrideSecret() {
+  for (const file of SECRET_FILES) {
+    try {
+      const value = fs.readFileSync(file, 'utf-8').trim();
+      if (value) return { value, source: file };
+    } catch {
+      // Not present; try the next candidate.
+    }
+  }
+  const env = (process.env.GOOGLE_CLIENT_SECRET_OVERRIDE || '').trim();
+  if (env) return { value: env, source: 'GOOGLE_CLIENT_SECRET_OVERRIDE' };
+  return { value: '', source: undefined };
+}
 
 const configDir = () =>
   path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), APP_NAME);
@@ -123,22 +162,28 @@ async function main() {
 
   const clientId = session.clientId;
   const envClientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
-  const override = (process.env.GOOGLE_CLIENT_SECRET_OVERRIDE || '').trim();
-  const clientSecret = override || (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+  const override = resolveOverrideSecret();
+  const clientSecret = override.value || (process.env.GOOGLE_CLIENT_SECRET || '').trim();
 
   if (!clientSecret) {
-    console.error('No client secret. Set GOOGLE_CLIENT_SECRET or GOOGLE_CLIENT_SECRET_OVERRIDE.');
-    process.exit(1);
-  }
-  if (!override && envClientId && envClientId !== clientId) {
     console.error(
-      '\nThe consent request used a different OAuth client than GOOGLE_CLIENT_ID, so the\n' +
-      'stored GOOGLE_CLIENT_SECRET belongs to the wrong client and Google will reject the\n' +
-      'exchange with invalid_client. Supply the secret for the client that issued this code\n' +
-      'via GOOGLE_CLIENT_SECRET_OVERRIDE, or re-run google-oauth-url.mjs without --client-id.'
+      `No client secret found. Write it to one of:\n  ${SECRET_FILES.join('\n  ')}\n` +
+      'or set GOOGLE_CLIENT_SECRET / GOOGLE_CLIENT_SECRET_OVERRIDE.'
     );
     process.exit(1);
   }
+  if (!override.value && envClientId && envClientId !== clientId) {
+    console.error(
+      '\nThe consent request used a different OAuth client than GOOGLE_CLIENT_ID, so the\n' +
+      'stored GOOGLE_CLIENT_SECRET belongs to the wrong client and Google would reject the\n' +
+      'exchange with invalid_client -- which would burn this single-use code. Supply the\n' +
+      `secret for the client that issued it in ${SECRET_FILES[SECRET_FILES.length - 1]},\n` +
+      'or re-run google-oauth-url.mjs without --client-id.'
+    );
+    process.exit(1);
+  }
+  console.log(`Client:       ${clientId.split('-')[0]} (project)`);
+  console.log(`Secret from:  ${override.source || 'GOOGLE_CLIENT_SECRET'}`);
 
   console.log('Exchanging authorization code for tokens...');
   const response = await fetch(TOKEN_URL, {
@@ -225,10 +270,13 @@ async function main() {
 
   // Kept out of stdout on purpose: this value belongs in the GOOGLE_REFRESH_TOKEN
   // secret, and printing it would leave it in terminal scrollback and logs.
-  const tokenFile = '/cursor/stores/self/google-refresh-token.txt';
+  //
+  // Not written under /cursor/stores either: that FUSE mount ignores chmod and is
+  // mounted allow_other, so the file would end up world-readable.
+  const tokenFile = path.join(configDir(), 'refresh-token.txt');
   let tokenFileWritten;
   try {
-    fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+    fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 });
     fs.writeFileSync(tokenFile, `${token.refresh_token}\n`, { mode: 0o600 });
     tokenFileWritten = tokenFile;
   } catch {
