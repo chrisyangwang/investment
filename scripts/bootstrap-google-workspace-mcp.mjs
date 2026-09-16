@@ -96,6 +96,15 @@ async function validateRefreshToken() {
   });
   if (!r.ok) {
     const body = await r.text();
+    // Distinguish an expired/revoked refresh token (invalid_grant) from other
+    // failures so the boot log points at the right remediation. Google OAuth
+    // clients in "Testing" status expire refresh tokens after ~7 days.
+    if (r.status === 400 && /invalid_grant/.test(body)) {
+      fail(
+        'refresh token expired or revoked (invalid_grant). Re-run scripts/oauth-refresh-token.mjs ' +
+          'and overwrite the GOOGLE_REFRESH_TOKEN Cloud Agent Secret, then start a fresh agent.',
+      );
+    }
     fail(`refresh token exchange failed (${r.status}): ${body}`);
   }
   return true;
