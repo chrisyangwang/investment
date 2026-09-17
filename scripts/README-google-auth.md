@@ -33,7 +33,23 @@ node scripts/bootstrap-google-workspace-mcp.mjs
 
 并做一次 refresh token 交换校验。
 
-建议把该命令放进环境的 **Install / Setup** 脚本，或在自动化提示词开头要求 agent 先执行。
+## 环境生命周期放置（Install vs Start）
+
+Cloud Agent 环境用 **build 快照**：`install` 只在构建快照时跑一次并被烘进快照，**每次新 VM 启动不会重跑**；`start` 每次开机都会跑。
+
+因此正确划分是：
+
+- **`install`（构建期，一次性、可幂等、烘进快照）**：预热 `@aaronsb/google-workspace-mcp` 的 npx 包，保证 MCP server 立即可用：
+  ```bash
+  node --version
+  npm exec -y --package=@aaronsb/google-workspace-mcp@^4.5.1 -- node -e "console.log('[install] google-workspace-mcp prewarmed')"
+  ```
+- **`start`（每次开机跑）**：回写 OAuth 凭据。凭据是临时的、且 refresh token 可能已在 Secret 里被更新，所以**必须放在 `start`**，不能放在 `install`：
+  ```bash
+  node scripts/bootstrap-google-workspace-mcp.mjs || echo "[start] google-workspace-mcp bootstrap skipped (Google secrets missing/invalid)"
+  ```
+
+`|| echo` 保证 token 缺失/失效时不会让开机失败；bootstrap 会把具体原因（含 `invalid_grant` 过期提示）打到 `start-user.log`。
 
 ## Token 失效时
 
