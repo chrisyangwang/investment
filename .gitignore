@@ -1,1 +1,8 @@
 tmp/
+
+# Source material pulled from Google Drive during research (large, reproducible
+# via scripts/drive-fetch.mjs) plus raw Wind API dumps.
+data/
+work/drive/
+work/hl/
+work/aj/
